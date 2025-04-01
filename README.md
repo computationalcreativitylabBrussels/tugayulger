@@ -1,2 +1,2 @@
 # tugayulger
-Bachelorproef repository for backup purposes
+Bachelorproef repository for backup purposes, once finished, it will include the whole project.
