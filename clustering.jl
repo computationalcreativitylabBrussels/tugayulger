@@ -430,40 +430,69 @@ function determine_voiced(df::DataFrame, window_size::Int64, step_size::Int64, f
     return
 end
 
-function analyze_frequencies(df::DataFrame, window_size::Int64, step_size::Int64, power_threshold::Float64, n_clusters::Int64)
-    # Return all resonances that are above power_threshold
+function analyze_frequencies(df::DataFrame, window_size::Int64, step_size::Int64, threshold::Float64, n_clusters::Int64 = 5, column::Symbol=:power)
+    # Return all resonances that are above the threshold
     resonances = DataFrame()
     mean_frequencies = []
 
-    for j in 0:step_size:(nrow(df) - step_size)
-        for i in 1:window_size # from i (onset index) start to end of window
-            if df[i + j, :power] >= power_threshold # Select all resonances that exceed threshold
-                push!(resonances, df[j + i, :])
+    # Normalize the specified column, use relative threshold instead of absolute, such that varying levels do not have an impact
+    # notice that it is not properly normalized yet - we could standardize with X = x - x min / x max - x min
+    min_value = minimum(df[!, column])
+    max_value = maximum(df[!, column])
+    df[!, :normalized_value] = (df[!, column] .- min_value) ./ (max_value .- min_value)
+    #df[!, :normalized_value] = df[!, column] ./ max_value
+
+    j = 1
+    while j <= nrow(df)
+        window_start = df[j, :onset]
+        window_end = window_start + window_size
+
+        for i in j:nrow(df)
+            current_onset = df[i, :onset]
+            if current_onset >= window_start && current_onset < window_end
+                if df[i, :normalized_value] >= threshold # Select all resonances that exceed threshold
+                    push!(resonances, df[i, :])
+                end
             end
         end
 
-        # should make the clustering possible, such that the clusters are based on frequency similarity
+        # If no resonances above threshold, skip this window
+        if isempty(resonances)
+            resonances = DataFrame()
+            j += step_size
+            continue
+        end
+
+        if nrow(resonances) < n_clusters
+            println("Not enough resonances for clustering in this window.")
+            resonances = DataFrame()
+            j += step_size
+            continue
+        end
+
+
+
+        # Sort resonances by frequency
         sort!(resonances, :frequency)
 
-        # normalize power column, use relative power threshold instead of absolute, such that varying power levels do not have an impact
-        highest_power = maximum(resonances[!, :power])
+        # Prepare columns for clustering
+        X = hcat(resonances.frequency)
 
-        resonances[!, :normalized_power] = resonances[!, :power] ./ highest_power
-
-        # prepare columns for clustering
-        X = hcat(resonances.frequency, resonances.normalized_power)
-
+        # Perform KMeans clustering
+        kmeans = KMeans(n_clusters=n_clusters).fit(X, sample_weight=resonances.normalized_value)
         kmeans = KMeans(n_clusters=n_clusters).fit(X)
         labels = kmeans.labels_
 
         resonances[!, :cluster] = labels
 
         # Calculate mean to get something like a formant
-        push!(mean_frequencies, combine(groupby(resonances, :cluster), :frequency => mean => :mean_frequency))
+        mean_freqs = combine(groupby(resonances, :cluster), :frequency => mean => :mean_frequency)
+        sort!(mean_freqs, :mean_frequency)
+        push!(mean_frequencies, (window_start, mean_freqs))
 
         # Reset
         resonances = DataFrame()
-
+        j += step_size
     end
 
     return mean_frequencies
@@ -495,8 +524,9 @@ function plot_frequency_power(df::DataFrame)
 end
 
 function plot_frequency_normalized_power(df::DataFrame)
-    highest_power = maximum(df[!, :power])
-    df[!, :normalized_power] = df[!, :power] ./ highest_power
+    min_value = minimum(df[!, :power])
+    max_value = maximum(df[!, :power])
+    df[!, :normalized_power] = (df[!, :power] .- min_value) ./ (max_value .- min_value)
 
     trace = scatter(
         mode="markers",
@@ -521,26 +551,80 @@ function plot_frequency_normalized_power(df::DataFrame)
     return p
 end
 
-function plot_frequency_amplitude(df::DataFrame)
+function plot_frequency_normalized_amplitude(df::DataFrame)
+    min_value = minimum(df[!, :amplitude])
+    max_value = maximum(df[!, :amplitude])
+    df[!, :normalized_amplitude] = (df[!, :amplitude] .- min_value) ./ (max_value .- min_value)
+
     trace = scatter(
         mode="markers",
         x=df.frequency,
-        y=df.amplitude,
+        y=df.normalized_amplitude,
         marker=attr(
             size=5,
             color="blue"
         ),
-        name="Frequency vs Amplitude"
+        name="Frequency vs normalized_amplitude"
     )
 
     layout = Layout(
-        title="Frequency vs Amplitude",
+        title="Frequency vs normalized_amplitude",
         xaxis_title="Frequency (Hz)",
-        yaxis_title="Amplitude"
+        yaxis_title="normalized_amplitude"
     )
 
     p = plot([trace], layout)
     #savefig(p, "frequency_amplitude.png")
+
+    return p
+end
+
+function plot_analyzed_frequencies(df::DataFrame, analyzed_freq::Vector{Any})
+    df[!, :time] = df[!, :onset] ./ 16000
+
+    filtered_window = filter(:frequency => x -> x <= 5000, df)
+
+    df = filtered_window
+
+    trace1 = scatter(
+        mode="markers",
+        #x=df.time,
+        x=DataFrame(),
+        y=DataFrame(),
+        #y=df.frequency,
+        marker=attr(
+           size=5,
+            color="blue"
+        ),
+        name="Original Frequencies"
+    )
+
+    traces = [trace1]
+    colors = ["red", "green", "orange", "purple"]
+    for (time_onset, resonances) in analyzed_freq
+        for (i, row) in enumerate(eachrow(resonances))
+            trace_resonances = scatter(
+                mode="markers",
+                x=[time_onset / 16000],
+                y=[row.mean_frequency],
+                marker=attr(
+                    size=8,
+                    color=colors[(i - 1) % length(colors) + 1]
+                ),
+                name="Formant $i"
+            )
+            push!(traces, trace_resonances)
+        end
+    end
+
+    layout = Layout(
+        title="Frequency vs Time with Resonances",
+        xaxis_title="Time (s)",
+        yaxis_title="Frequency (Hz)"
+    )
+
+    p = plot(traces, layout)
+    #savefig(p, "frequency_time_resonances.png")
 
     return p
 end
@@ -560,24 +644,29 @@ end
 
 df = DataFrame(CSV.File(PATH))
 
-#window = df[14850:20200, :] # window with vowel -> you can see peaks in power
-#filtered_window = filter(:frequency => x -> x > 0, window)
-
 #window = select_window(df, 14850, 20200)
-window = select_window(df, 10200, 11000)
-#window = select_window(df, 4800, 5600)
+#window = select_window(df, 34715, 36080)
+#window = select_window(df, 10200, 11000)
+#window = select_window(df, 4559, 5723)
+#window = select_window(df, 0, 50000)
+#window = select_window(df, 0, 4500)
 
-#window = df[151950:169450, :] # window with vowel -> you can see peaks in power
-#filtered_window = filter(:frequency => x -> x > 0, window)
+#debugging
+#window = select_window(df, 4559, 5723) # total vowel
+#window = select_window(df, 4559, 5001) # segment that works
+#window = select_window(df, 5049, 5723) # segment that doesn't work
+#window = select_window(df, 5049, 5301)
+#window = select_window(df, 5300, 5351)
+window = select_window(df, 5351, 5723)
 
-#window = df[10850:14850, :] # window without vowel -> you can not see same peaks in power, the overall power distribution is much lower
-#filtered_window = filter(:frequency => x -> x > 0, window)
+filtered_window = filter(:frequency => x -> x > 0, window)
 
-plot_frequency_power(window)
-#plot_frequency_normalized_power(window)
+#plot_frequency_normalized_amplitude(window)
+plot_frequency_normalized_power(filtered_window)
 #plot_frequency_amplitude(window)
 #determine_voiced(raw, 800, 800, 300.0, 0.008)
 
 #n_clusters = 5
 
-#resonances = analyze_frequencies(filtered_window, 800, 800, 0.00005, n_clusters)
+#resonances = analyze_frequencies(filtered_window, 800, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
+#plot_analyzed_frequencies(filtered_window, resonances)
