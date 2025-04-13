@@ -430,6 +430,7 @@ function determine_voiced(df::DataFrame, window_size::Int64, step_size::Int64, f
     return
 end
 
+# TODO STILL WRONG NOT WINDOWING IN THE RIGTH WAY!!! ROW = ! WINDOW
 function analyze_frequencies(df::DataFrame, window_size::Int64, step_size::Int64, threshold::Float64, n_clusters::Int64 = 5, column::Symbol=:power)
     # Return all resonances that are above the threshold
     resonances = DataFrame()
@@ -498,6 +499,153 @@ function analyze_frequencies(df::DataFrame, window_size::Int64, step_size::Int64
     return mean_frequencies
 end
 
+function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64, threshold::Float64, column::Symbol=:power, frequency_diff::Float64 = 100.0, group_size_tolerance::Float64 = 100.0)
+    # Normalize the specified column
+    min_value = minimum(df[!, column])
+    max_value = maximum(df[!, column])
+    df[!, :normalized_value] = (df[!, column] .- min_value) ./ (max_value - min_value)
+
+    # Prepare output
+    windowed_groups = []
+
+    # Set initial window parameters based on actual onset values
+    current_time = minimum(df.onset)
+    end_time = maximum(df.onset)
+
+    while current_time + window_size <= end_time
+        window_start = current_time
+        window_end = current_time + window_size
+
+        # Filter data within the window and above threshold
+        resonances = filter(row -> row.onset >= window_start && row.onset < window_end &&
+                                   row.normalized_value >= threshold, df)
+
+        if isempty(resonances)
+            current_time += step_size
+            continue
+        end
+
+        # Sort by frequency
+        sort!(resonances, :frequency)
+
+        groups = []
+        current_group = resonances[1:1, :]
+
+        first_frequency = resonances[1, :frequency]
+        last_frequency = resonances[1, :frequency]
+        for i in 2:nrow(resonances)
+            freq = resonances[i, :frequency]
+            if abs(freq - last_frequency) <= frequency_diff && abs(freq - first_frequency) <= group_size_tolerance
+                push!(current_group, resonances[i, :])
+                last_frequency = freq
+            else
+                push!(groups, current_group)
+                current_group = resonances[i:i, :]
+                first_frequency = freq
+                last_frequency = freq
+            end
+        end
+        push!(groups, current_group)
+
+        push!(windowed_groups, (window_start, groups))
+
+        current_time += step_size
+    end
+
+    return windowed_groups
+end
+
+function process_peaks(windowed_groups)
+    processed_output = []
+
+    for (window_start, groups) in windowed_groups
+        window_result = []
+
+        for group in groups
+            mean_frequency = mean(group[!, :frequency])
+            #total_power = sum(group[!, :power])  # Calculate the sum of powers
+            total_power = maximum(group[!, :power])
+            push!(window_result, (mean_frequency, total_power))
+        end
+
+        push!(processed_output, (window_start, window_result))
+    end
+
+    return processed_output
+end
+
+function extract_formants(onset_vectors::Vector{Any}, tolerance::Float64, max_harmonics::Int = 10, min_distance::Float64 = 100.0)
+    harmonics_output = []
+
+    for (onset, points) in onset_vectors
+        F1 = points[argmax(map(x -> x[2], points))]
+        f0 = points[1][1]
+
+        harmonic_frequencies = []
+        for n in 1:max_harmonics
+            harmonic_freq = f0 * n
+            if any(abs(point[1] - harmonic_freq) <= tolerance for point in points)
+                push!(harmonic_frequencies, harmonic_freq)
+            else
+                break
+            end
+        end
+
+        detected_formants = [F1]  # Start with F1 as the first detected formant
+
+        filtered_points = []
+        for point in points
+            if point in detected_formants ||
+               (all(abs(point[1] - h) > tolerance for h in harmonic_frequencies) &&
+                all(abs(point[1] - formant[1]) >= min_distance for formant in detected_formants)) &&
+               point[1] >= F1[1]
+                push!(filtered_points, point)
+                push!(detected_formants, point)  # Add the point to detected formants
+            end
+        end
+
+        push!(harmonics_output, (onset, filtered_points))
+    end
+
+    return harmonics_output
+end
+
+function extract_f0_and_harmonics(onset_vectors::Vector{Any}, tolerance::Float64, max_harmonics::Int = 10)
+    harmonics_output = []
+
+    for (onset, points) in onset_vectors
+        # Find the lowest frequency point as f0
+        lowest_point = points[argmin(map(x -> x[1], points))]
+        f0 = lowest_point[1]
+        harmonics = [lowest_point]
+
+        # Start searching for harmonics from f0 * 2
+        for n in 2:max_harmonics
+            harmonic_freq = f0 * n
+            found_harmonic = false
+
+            for point in points
+                freq = point[1]
+                if abs(freq - harmonic_freq) <= tolerance
+                    push!(harmonics, point)
+                    found_harmonic = true
+                    break
+                end
+            end
+
+            # Stop searching if the current harmonic is not found
+            if !found_harmonic
+                break
+            end
+        end
+
+        push!(harmonics_output, (onset, harmonics))
+    end
+
+    return harmonics_output
+end
+
+
 # plot in one window, frequency against power to determine peaks in power
 function plot_frequency_power(df::DataFrame)
     trace = scatter(
@@ -546,7 +694,7 @@ function plot_frequency_normalized_power(df::DataFrame)
     )
 
     p = plot([trace], layout)
-    #savefig(p, "frequency_normalized_power.png")
+    savefig(p, "frequency_normalized_power.png")
 
     return p
 end
@@ -634,8 +782,6 @@ function select_window(df::DataFrame, begin_onset::Int64, end_onset::Int64)
     return window
 end
 
-#############################################################################
-
 # accuracy must be a value between 10 and 50, since 0.1 <= eps <= 0.5
 # The higher the value, the less accuracy (just inverse for user later), 
 # mainly used for pieces where notes vary strongly in time
@@ -657,16 +803,37 @@ df = DataFrame(CSV.File(PATH))
 #window = select_window(df, 5049, 5723) # segment that doesn't work
 #window = select_window(df, 5049, 5301)
 #window = select_window(df, 5300, 5351)
-window = select_window(df, 5351, 5723)
+#window = select_window(df, 5351, 5723)
+
+# VOWELS
+#window = select_window(df, 4559, 5723)
+#window = select_window(df, 6642, 8772) # hard both for me and praat
+#window = select_window(df, 10337, 11517)
+window = select_window(df, 12640, 14714)
+#window = select_window(df, 18088, 20417)
+#window = select_window(df, 24229, 25566)
+#window = select_window(df, 27156, 28064)
+#window = select_window(df, 29660, 31719)
+#window = select_window(df, 34715, 36080)
+#window = select_window(df, 37556, 39561)
+#window = select_window(df, 42059, 43479)
 
 filtered_window = filter(:frequency => x -> x > 0, window)
 
 #plot_frequency_normalized_amplitude(window)
-plot_frequency_normalized_power(filtered_window)
+#plot_frequency_normalized_power(filtered_window)
 #plot_frequency_amplitude(window)
 #determine_voiced(raw, 800, 800, 300.0, 0.008)
 
 #n_clusters = 5
 
-#resonances = analyze_frequencies(filtered_window, 800, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
+#resonances = analyze_frequencies(filtered_window, 400, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
 #plot_analyzed_frequencies(filtered_window, resonances)
+
+grouped_resonances = identify_peaks(filtered_window, 400., 200.0, 0.01, :power, 20.0, 50.0)
+
+processed_resonances = process_peaks(grouped_resonances)
+
+#harmonics = extract_f0_and_harmonics(processed_resonances, 5.0)
+
+formants = extract_formants(processed_resonances, 10.0)
