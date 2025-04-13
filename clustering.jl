@@ -505,6 +505,11 @@ function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64,
     max_value = maximum(df[!, column])
     df[!, :normalized_value] = (df[!, column] .- min_value) ./ (max_value - min_value)
 
+    # Normalize frequency
+    min_frequency = minimum(df[!, :frequency])
+    max_frequency = maximum(df[!, :frequency])
+    df[!, :normalized_frequency] = (df[!, :frequency] .- min_frequency) ./ (max_frequency - min_frequency)
+
     # Prepare output
     windowed_groups = []
 
@@ -525,16 +530,16 @@ function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64,
             continue
         end
 
-        # Sort by frequency
-        sort!(resonances, :frequency)
+        # Sort by normalized frequency
+        sort!(resonances, :normalized_frequency)
 
         groups = []
         current_group = resonances[1:1, :]
 
-        first_frequency = resonances[1, :frequency]
-        last_frequency = resonances[1, :frequency]
+        first_frequency = resonances[1, :normalized_frequency]
+        last_frequency = resonances[1, :normalized_frequency]
         for i in 2:nrow(resonances)
-            freq = resonances[i, :frequency]
+            freq = resonances[i, :normalized_frequency]
             if abs(freq - last_frequency) <= frequency_diff && abs(freq - first_frequency) <= group_size_tolerance
                 push!(current_group, resonances[i, :])
                 last_frequency = freq
@@ -552,7 +557,7 @@ function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64,
         current_time += step_size
     end
 
-    return windowed_groups
+    return windowed_groups, (min_value, max_value, min_frequency, max_frequency)
 end
 
 function process_peaks(windowed_groups)
@@ -562,9 +567,8 @@ function process_peaks(windowed_groups)
         window_result = []
 
         for group in groups
-            mean_frequency = mean(group[!, :frequency])
-            #total_power = sum(group[!, :power])  # Calculate the sum of powers
-            total_power = maximum(group[!, :power])
+            mean_frequency = mean(group[!, :normalized_frequency])
+            total_power = maximum(group[!, :normalized_value])
             push!(window_result, (mean_frequency, total_power))
         end
 
@@ -574,33 +578,47 @@ function process_peaks(windowed_groups)
     return processed_output
 end
 
-function extract_formants(onset_vectors::Vector{Any}, tolerance::Float64, max_harmonics::Int = 10, min_distance::Float64 = 100.0)
+function extract_formants(onset_vectors::Vector{Any}, tolerance::Float64, min_distance::Float64 = 0.01)
     harmonics_output = []
 
     for (onset, points) in onset_vectors
+
+        harmonics = extract_f0_and_harmonics(onset_vectors, 0.05)[1][2]
+        harmonic_frequencies = [h[1] for h in harmonics]
+
         F1 = points[argmax(map(x -> x[2], points))]
-        f0 = points[1][1]
-
-        harmonic_frequencies = []
-        for n in 1:max_harmonics
-            harmonic_freq = f0 * n
-            if any(abs(point[1] - harmonic_freq) <= tolerance for point in points)
-                push!(harmonic_frequencies, harmonic_freq)
-            else
-                break
-            end
-        end
-
-        detected_formants = [F1]  # Start with F1 as the first detected formant
+        detected_formants = [F1]
 
         filtered_points = []
         for point in points
-            if point in detected_formants ||
-               (all(abs(point[1] - h) > tolerance for h in harmonic_frequencies) &&
-                all(abs(point[1] - formant[1]) >= min_distance for formant in detected_formants)) &&
-               point[1] >= F1[1]
+            if point in detected_formants
+                println("Point $(point[1] * 8000) Hz is already in detected_formants.")
                 push!(filtered_points, point)
-                push!(detected_formants, point)  # Add the point to detected formants
+                push!(detected_formants, point)
+                continue
+            end
+
+            is_far_from_harmonics = all(abs(point[1] - h) > tolerance for h in harmonic_frequencies)
+            if !is_far_from_harmonics
+                println("Point $(point[1] * 8000) Hz is too close to a harmonic frequency.")
+            end
+
+            is_far_from_formants = all(abs(point[1] - formant[1]) >= min_distance for formant in detected_formants)
+            if !is_far_from_formants
+                println("Point $(point[1] * 8000) Hz is too close to an existing formant.")
+            end
+
+            is_above_F1 = point[1] >= F1[1]
+            if !is_above_F1
+                println("Point $(point[1] * 8000) Hz is below F1's frequency $(F1[1] * 8000) Hz.")
+            end
+
+            if is_far_from_harmonics && is_far_from_formants && is_above_F1
+                println("Point $(point[1] * 8000) Hz passed all checks and is added.")
+                push!(filtered_points, point)
+                push!(detected_formants, point)
+            else
+                println("Filtered out: Frequency $(point[1] * 8000) Hz at onset $(onset / 16000)")
             end
         end
 
@@ -699,6 +717,130 @@ function plot_frequency_normalized_power(df::DataFrame)
     return p
 end
 
+function plot_normalized_frequency_normalized_power(df::DataFrame)
+    # Normalize power
+    min_power = minimum(df[!, :power])
+    max_power = maximum(df[!, :power])
+    df[!, :normalized_power] = (df[!, :power] .- min_power) ./ (max_power .- min_power)
+
+    # Normalize frequency
+    min_frequency = minimum(df[!, :frequency])
+    max_frequency = maximum(df[!, :frequency])
+    df[!, :normalized_frequency] = (df[!, :frequency] .- min_frequency) ./ (max_frequency .- min_frequency)
+
+    # Create scatter plot with normalized frequency and power
+    trace = scatter(
+        mode="markers",
+        x=df.normalized_frequency,
+        y=df.normalized_power,
+        marker=attr(
+            size=5,
+            color="blue"
+        ),
+        name="Normalized Frequency vs Normalized Power"
+    )
+
+    layout = Layout(
+        title="Normalized Frequency vs Normalized Power",
+        xaxis_title="Normalized Frequency",
+        yaxis_title="Normalized Power"
+    )
+
+    p = plot([trace], layout)
+    savefig(p, "normalized_frequency_normalized_power.png")
+
+    return p
+end
+
+function plot_spectrum(processed_resonances, normalization_factors)
+    min_value, max_value, min_frequency, max_frequency = normalization_factors
+
+    original_data = DataFrame(onset=Float64[], frequency=Float64[], power=Float64[])
+    for (onset, points) in processed_resonances
+        for (normalized_frequency, normalized_power) in points
+            original_frequency = normalized_frequency * (max_frequency - min_frequency) + min_frequency
+            original_power = normalized_power * (max_value - min_value) + min_value
+            push!(original_data, (onset / 16000, original_frequency, original_power))
+        end
+    end
+
+    trace = scatter(
+        mode="markers",
+        x=original_data.onset,
+        y=original_data.frequency,
+        marker=attr(
+            size=5,
+            color=original_data.power,
+            colorscale="Viridis",
+            colorbar=attr(title="Power")
+        ),
+        name="Frequency vs Onset"
+    )
+
+    layout = Layout(
+        title="Frequency vs Onset (Original Values)",
+        xaxis_title="Onset (s)",
+        yaxis_title="Frequency (Hz)"
+    )
+
+    p = plot([trace], layout)
+    savefig(p, "original_spectrum.png")
+
+    return p
+end
+
+function plot_grouped_resonances(grouped_resonances, normalization_factors)
+    min_value, max_value, min_frequency, max_frequency = normalization_factors
+
+    # Prepare data for plotting
+    original_data = DataFrame(onset=Float64[], frequency=Float64[])
+    for (onset, groups) in grouped_resonances
+        for group in groups
+            for row in eachrow(group)
+                original_frequency = row[:normalized_frequency] * (max_frequency - min_frequency) + min_frequency
+                push!(original_data, (onset / 16000, original_frequency))
+            end
+        end
+    end
+
+    # Create scatter plot
+    trace = scatter(
+        mode="markers",
+        x=original_data.onset,
+        y=original_data.frequency,
+        marker=attr(
+            size=5,
+            color="blue"
+        ),
+        name="Grouped Resonances"
+    )
+
+    layout = Layout(
+        title="Grouped Resonances (Original Values)",
+        xaxis_title="Onset (s)",
+        yaxis_title="Frequency (Hz)"
+    )
+
+    p = plot([trace], layout)
+    savefig(p, "grouped_resonances.png")
+
+    return p
+end
+
+function print_reconstructed_values(data, normalization_factors)
+    min_value, max_value, min_frequency, max_frequency = normalization_factors
+
+    println("Reconstructed Values:")
+    for (onset, points) in data
+        println("Onset (s): ", onset / 16000)
+        for (normalized_frequency, normalized_value) in points
+            original_frequency = normalized_frequency * (max_frequency - min_frequency) + min_frequency
+            original_value = normalized_value * (max_value - min_value) + min_value
+            println("  Frequency (Hz): ", original_frequency, ", Value: ", original_value)
+        end
+    end
+end
+
 function plot_frequency_normalized_amplitude(df::DataFrame)
     min_value = minimum(df[!, :amplitude])
     max_value = maximum(df[!, :amplitude])
@@ -722,9 +864,24 @@ function plot_frequency_normalized_amplitude(df::DataFrame)
     )
 
     p = plot([trace], layout)
-    #savefig(p, "frequency_amplitude.png")
+    savefig(p, "frequency_amplitude.png")
 
     return p
+end
+
+function dynamic_threshold_filter(df::DataFrame, column::Symbol=:amplitude, factor::Float64=0.5)
+    # Calculate mean and standard deviation of the column
+    mean_value = mean(df[!, column])
+    std_dev = std(df[!, column])
+
+    # Define the dynamic threshold
+    dynamic_threshold = mean_value + factor * std_dev
+    println("Dynamic Threshold: ", dynamic_threshold)
+
+    # Filter rows based on the dynamic threshold
+    filtered_df = filter(row -> row[column] >= dynamic_threshold, df)
+
+    return filtered_df
 end
 
 function plot_analyzed_frequencies(df::DataFrame, analyzed_freq::Vector{Any})
@@ -809,7 +966,7 @@ df = DataFrame(CSV.File(PATH))
 #window = select_window(df, 4559, 5723)
 #window = select_window(df, 6642, 8772) # hard both for me and praat
 #window = select_window(df, 10337, 11517)
-window = select_window(df, 12640, 14714)
+#window = select_window(df, 12640, 14714) # ---- problem with threshold, where F3 and F4 are below 0.1 for amplitude
 #window = select_window(df, 18088, 20417)
 #window = select_window(df, 24229, 25566)
 #window = select_window(df, 27156, 28064)
@@ -820,20 +977,27 @@ window = select_window(df, 12640, 14714)
 
 filtered_window = filter(:frequency => x -> x > 0, window)
 
-#plot_frequency_normalized_amplitude(window)
-#plot_frequency_normalized_power(filtered_window)
+#plot_frequency_normalized_amplitude(filtered_window)
+plot_frequency_normalized_power(filtered_window)
+#plot_normalized_frequency_normalized_power(filtered_window)
 #plot_frequency_amplitude(window)
 #determine_voiced(raw, 800, 800, 300.0, 0.008)
 
 #n_clusters = 5
-
 #resonances = analyze_frequencies(filtered_window, 400, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
 #plot_analyzed_frequencies(filtered_window, resonances)
 
-grouped_resonances = identify_peaks(filtered_window, 400., 200.0, 0.01, :power, 20.0, 50.0)
+#grouped_resonances, normalization_factors = identify_peaks(filtered_window, 400., 200.0, 0.01, :power, 0.01, 0.01)
+grouped_resonances, normalization_factors = identify_peaks(filtered_window, 400., 200.0, 0.1, :amplitude, 0.01, 0.01)
 
 processed_resonances = process_peaks(grouped_resonances)
 
-#harmonics = extract_f0_and_harmonics(processed_resonances, 5.0)
+#harmonics = extract_f0_and_harmonics(processed_resonances, 0.05)
 
-formants = extract_formants(processed_resonances, 10.0)
+formants = extract_formants(processed_resonances, 0.1)
+
+#plot_spectrum(processed_resonances, normalization_factors)
+
+#plot_grouped_resonances(grouped_resonances, normalization_factors)
+
+print_reconstructed_values(formants, normalization_factors)
