@@ -169,10 +169,12 @@ function plot_grouped_resonances(grouped_resonances, normalization_factors)
 end
 
 function print_reconstructed_values(data, normalization_factors)
-    min_value, max_value, min_frequency, max_frequency = normalization_factors
+    min_values, max_values, min_frequency, max_frequency = normalization_factors
 
     println("Reconstructed Values:")
     for (onset, points) in data
+        min_value = min_values[onset]
+        max_value = max_values[onset]
         println("Onset (s): ", onset / 16000)
         for (normalized_frequency, normalized_value) in points
             original_frequency = normalized_frequency * (max_frequency - min_frequency) + min_frequency
@@ -208,21 +210,6 @@ function plot_frequency_normalized_amplitude(df::DataFrame)
     savefig(p, "frequency_amplitude.png")
 
     return p
-end
-
-function dynamic_threshold_filter(df::DataFrame, column::Symbol=:amplitude, factor::Float64=0.5)
-    # Calculate mean and standard deviation of the column
-    mean_value = mean(df[!, column])
-    std_dev = std(df[!, column])
-
-    # Define the dynamic threshold
-    dynamic_threshold = mean_value + factor * std_dev
-    println("Dynamic Threshold: ", dynamic_threshold)
-
-    # Filter rows based on the dynamic threshold
-    filtered_df = filter(row -> row[column] >= dynamic_threshold, df)
-
-    return filtered_df
 end
 
 function plot_analyzed_frequencies(df::DataFrame, analyzed_freq::Vector{Any})

@@ -66,11 +66,8 @@ function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64,
 end
 
 function determine_peaks(df::DataFrame, window_size::Float64, step_size::Float64, threshold::Float64, column::Symbol=:power, frequency_diff::Float64 = 100.0, group_size_tolerance::Float64 = 100.0)
-    # Normalize the specified column
-    min_value = minimum(df[!, column])
-    max_value = maximum(df[!, column])
-    df[!, :normalized_value] = (df[!, column] .- min_value) ./ (max_value - min_value)
-
+    min_values = Dict{Float64, Float64}()
+    max_values = Dict{Float64, Float64}()
     # Normalize the frequency column
     min_frequency = minimum(df[!, :frequency])
     max_frequency = maximum(df[!, :frequency])
@@ -94,6 +91,13 @@ function determine_peaks(df::DataFrame, window_size::Float64, step_size::Float64
             current_time += step_size
             continue
         end
+
+        # Normalized value
+        min_value = minimum(resonances[!, column])
+        max_value = maximum(resonances[!, column])
+        resonances[!, :normalized_value] = (resonances[!, column] .- min_value) ./ (max_value - min_value)
+        min_values[window_start] = min_value
+        max_values[window_start] = max_value
 
         # Use SciPy's find_peaks to identify peaks
         values = resonances[!, :normalized_value]
@@ -128,10 +132,34 @@ function determine_peaks(df::DataFrame, window_size::Float64, step_size::Float64
         current_time += step_size
     end
 
-    return windowed_groups, (min_value, max_value, min_frequency, max_frequency)
+    return windowed_groups, (min_values, max_values, min_frequency, max_frequency)
 end
 
 function process_peaks(windowed_groups)
+    processed_output = []
+
+    for (window_start, groups) in windowed_groups
+        window_result = []
+
+        for group in groups
+            weights = group[!, :normalized_value]
+            frequencies = group[!, :normalized_frequency]
+            weighted_mean_frequency = sum(frequencies .* weights) / sum(weights)
+
+            # Calculate total power
+            total_power = sum(weights)
+
+            push!(window_result, (weighted_mean_frequency, total_power))
+        end
+
+        push!(processed_output, (window_start, window_result))
+    end
+
+    return processed_output
+end
+
+# first version
+function process_peaks_mean(windowed_groups)
     processed_output = []
 
     for (window_start, groups) in windowed_groups
@@ -147,6 +175,34 @@ function process_peaks(windowed_groups)
     end
 
     return processed_output
+end
+
+function print_scores(scored_data, normalization_factors)
+    println("Scores for Points:")
+    min_value, max_value, min_frequency, max_frequency = normalization_factors
+
+    for (onset, scores) in scored_data
+        println("Onset (s): ", onset / 16000)
+        for score in scores
+            # Ensure score is a tuple and access elements by index
+            normalized_frequency = score[1]
+            normalized_power = score[2]
+            f0_score = score[3]
+            f1_score = score[4]
+            harmonic_score = score[5]
+
+            # Reconstruct original values
+            original_frequency = normalized_frequency * (max_frequency - min_frequency) + min_frequency
+            original_power = normalized_power * (max_value - min_value) + min_value
+
+            # Print the reconstructed values and scores
+            println("  Frequency (Hz): ", original_frequency,
+                    ", Power: ", original_power,
+                    ", F0 Score: ", f0_score,
+                    ", F1 Score: ", f1_score,
+                    ", Harmonic Score: ", harmonic_score)
+        end
+    end
 end
 
 end

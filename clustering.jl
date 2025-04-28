@@ -13,6 +13,8 @@ include("formant_analyzer.jl")
 using .FormantAnalyzer
 include("peak_analysis.jl")
 using .PeakAnalysis
+include("formant_scorer.jl")
+using .FormantScorer
 
 np = pyimport("numpy")
 ENV["PYTHON"]="C:/Users/tugay/Anaconda3/python.exe"
@@ -522,16 +524,20 @@ df = DataFrame(CSV.File(PATH))
 #window = select_window(df, 0, 50000)
 #window = select_window(df, 0, 4500)
 
+function select_window(df::DataFrame, begin_onset::Int64, end_onset::Int64)
+    return FormantAnalyzer.select_window(df, begin_onset, end_onset)
+end
+
 #debugging
 #window = select_window(df, 4559, 5723) # total vowel
 #window = select_window(df, 4559, 5001) # segment that works
-#window = select_window(df, 5049, 5723) # segment that doesn't work
+window = select_window(df, 5049, 5723) # segment that doesn't work
 #window = select_window(df, 5049, 5301)
 #window = select_window(df, 5300, 5351)
 #window = select_window(df, 5351, 5723)
 
 # VOWELS
-window = select_window(df, 4559, 5723)
+#window = select_window(df, 4559, 5723)
 #window = select_window(df, 6642, 8772) # hard both for me and praat
 #window = select_window(df, 10337, 11517)
 #window = select_window(df, 12640, 14714) # ---- problem with threshold, where F3 and F4 are below 0.1 for amplitude
@@ -540,16 +546,17 @@ window = select_window(df, 4559, 5723)
 #window = select_window(df, 27156, 28064)
 #window = select_window(df, 29660, 31719)
 #window = select_window(df, 34715, 36080)
-#window = select_window(df, 37556, 39561)
+#window = select_window(df, 37556, 39561) # very very hard to solve
 #window = select_window(df, 42059, 43479)
 
 filtered_window = filter(:frequency => x -> x > 0, window)
 
-Plotting.plot_frequency_normalized_amplitude(filtered_window)
-#Plotting.plot_frequency_normalized_power(filtered_window)
-#Plotting.plot_normalized_frequency_normalized_power(filtered_window)
-#Plotting.plot_frequency_amplitude(window)
+plot = Plotting.plot_frequency_normalized_amplitude(filtered_window)
+#plot = Plotting.plot_frequency_normalized_power(filtered_window)
+#plot = Plotting.plot_normalized_frequency_normalized_power(filtered_window)
+#plot = Plotting.plot_frequency_amplitude(window)
 #determine_voiced(raw, 800, 800, 300.0, 0.008)
+display(plot)
 
 #n_clusters = 5
 #resonances = analyze_frequencies(filtered_window, 400, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
@@ -557,14 +564,16 @@ Plotting.plot_frequency_normalized_amplitude(filtered_window)
 
 #grouped_resonances, normalization_factors = PeakAnalysis.identify_peaks(filtered_window, 400., 200.0, 0.01, :power, 0.01, 0.01)
 #grouped_resonances, normalization_factors = PeakAnalysis.identify_peaks(filtered_window, 400., 200.0, 0.1, :amplitude, 0.01, 0.01)
-#grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(filtered_window, 400., 200.0, 0.1, :amplitude, 0.01, 0.01)
+grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(filtered_window, 400., 200.0, 0.03, :amplitude, 0.01, 0.01)
 
 #processed_resonances = PeakAnalysis.process_peaks(grouped_resonances)
-
+processed_resonances = PeakAnalysis.process_peaks_mean(grouped_resonances)
 #harmonics = FormantAnalyzer.extract_f0_and_harmonics(processed_resonances, 0.05)
+formants = FormantAnalyzer.extract_formants2(processed_resonances, 0.05)
 
-#formants = FormantAnalyzer.extract_formants(processed_resonances, 0.1)
+#scored_data = FormantScorer.calculate_scores(processed_resonances, 0.01, :power)
+#FormantScorer.print_scores(scored_data, normalization_factors)
 
 #Plotting.plot_grouped_resonances(grouped_resonances, normalization_factors)
-<
 #Plotting.print_reconstructed_values(processed_resonances, normalization_factors)
+Plotting.print_reconstructed_values(formants, normalization_factors)
