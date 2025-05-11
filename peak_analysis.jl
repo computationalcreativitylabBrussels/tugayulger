@@ -66,12 +66,16 @@ function identify_peaks(df::DataFrame, window_size::Float64, step_size::Float64,
 end
 
 function determine_peaks(df::DataFrame, window_size::Float64, step_size::Float64, threshold::Float64, column::Symbol=:power, frequency_diff::Float64 = 100.0, group_size_tolerance::Float64 = 100.0)
+    # filter any resonance that has a higher frequency than 5000
+    df = filter(row -> row.frequency <= 5000, df)
+
     min_values = Dict{Float64, Float64}()
     max_values = Dict{Float64, Float64}()
     # Normalize the frequency column
     min_frequency = minimum(df[!, :frequency])
     max_frequency = maximum(df[!, :frequency])
     df[!, :normalized_frequency] = (df[!, :frequency] .- min_frequency) ./ (max_frequency - min_frequency)
+
 
     # Prepare output
     windowed_groups = []
@@ -99,9 +103,14 @@ function determine_peaks(df::DataFrame, window_size::Float64, step_size::Float64
         min_values[window_start] = min_value
         max_values[window_start] = max_value
 
+
         # Use SciPy's find_peaks to identify peaks
         values = resonances[!, :normalized_value]
-        peaks_indices, _ = SciPy.signal.find_peaks(values, height=threshold)
+        if threshold == 0 # no threshold specified, means do not use any threshold
+            peaks_indices, _ = SciPy.signal.find_peaks(values)
+        else
+            peaks_indices, _ = SciPy.signal.find_peaks(values, height=threshold)
+        end
 
         # Extract peak rows
         peaks = resonances[peaks_indices .+ 1, :]

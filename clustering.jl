@@ -1,3 +1,7 @@
+module Clustering
+
+export get_formants, process, process_into_peaks
+
 # NOTE: f0 has the additional row "ID", so code slightly different
 using PlotlyJS, ClusterAnalysis, StatsBase, DataFrames, CSV, LinearAlgebra, Statistics
 using PyCall
@@ -15,6 +19,8 @@ include("peak_analysis.jl")
 using .PeakAnalysis
 include("formant_scorer.jl")
 using .FormantScorer
+include("envelope_analysis.jl")
+using .EnvelopeAnalysis
 
 np = pyimport("numpy")
 ENV["PYTHON"]="C:/Users/tugay/Anaconda3/python.exe"
@@ -48,64 +54,124 @@ PATH = "C:/Users/tugay/Desktop/master_clone/Master-Thesis/code/fpt/data/output/t
 PATH_OUTPUT = "C:/Users/tugay/Desktop/master_clone/Master-Thesis/code/fpt/data/output/timit/" * filename * "_clustered.csv"
 PATH_PNG = "C:/Users/tugay/Desktop/master_clone/Master-Thesis/code/fpt/data/output/timit/" * filename * ".png"
 
+FOLDER_PATH = "C:/Users/tugay/Desktop/pilot-project/TIMIT/data/lisa/data/timit/raw/output_sentence/fpt_outputs"
+
 EPS = 0.05
 PTS = 4
 
-function main(path, accuracy)
-    raw = DataFrame(CSV.File(path))
+function process_into_peaks(csv_file_path::String, vowel_ranges::Vector{Tuple{Int, Int}}, output_csv_path::String)
+    # Read the data from the CSV file
+    df = CSV.read(csv_file_path, DataFrame)
 
-    # Additional id column for hierarchical knowledge representation
-    raw[!,:id] = collect(1:size(raw)[1])
+    # Open the output CSV file for writing
+    open(output_csv_path, "w") do file
+        # Write the header
+        write(file, "Onset_Start,Onset_End,Peak_Frequency,Peak_Power\n")
 
-    # remove the negative resonances to perform machine learning techniques only on the real part 
-    pos_raw = filter(:frequency => x -> x > 0, raw)
+        # Iterate through each vowel range
+        for (onset_start, onset_end) in vowel_ranges
+            # Filter data within the onset range
+            segment = filter(row -> row.onset >= onset_start && row.onset <= onset_end, df)
 
-    # cluster the f0 subset
-    #f0_raw = pos_raw[isequal.(pos_raw.f0,1), :]
-    #f0_raw = filter(:f0 => isequal(1), f0_raw)
-    f0_raw = filter(:power => x -> x > 0.00001, pos_raw)
+            # Skip if no data is found in the range
+            if isempty(segment)
+                continue
+            end
 
-    #f0_raw = apply_filter(f0_raw, 50)
-    f0_raw = harmonic_filter(f0_raw, 200.0, 300.0)
+            # Determine peaks using the determine_peaks function
+            windowed_groups, _ = determine_peaks(segment, 0.1, 0.05, 0.0)  # Example parameters
 
-    clustered_f0 = hyperparameterTuning(f0_raw, accuracy)
-
-    for (id, f0) in zip(clustered_f0.id, clustered_f0.f0)
-        indices = findall(x -> x == id, pos_raw.id)
-        pos_raw[indices, :f0] .= f0
-    end
-
-    pos_raw[!, :harmonic] .= -1
-    pos_raw[!, :likeliness] .= 0.5
-
-    temp = pos_raw
-    max = maximum(clustered_f0.f0)
-
-    # Power denoiser
-    for i in 1:max
-        avg_power, n_elements = avg_power_cluster(pos_raw, i)
-
-        println("avg power: ", avg_power)
-        println("n_elements: ", n_elements)
-
-        if (avg_power < 0.0001 || n_elements < 10)
-            temp = temp[temp.f0 .!= i, :]
+            # Process peaks and write them to the CSV
+            for (window_start, groups) in windowed_groups
+                for group in groups
+                    for row in eachrow(group)
+                        write(file, "$(onset_start),$(onset_end),$(row.frequency),$(row.power)\n")
+                    end
+                end
+            end
         end
     end
+end
 
-    for i in 1:maximum(clustered_f0.f0)
-        # Harmonics
-        pos_raw = overtoneSlice(pos_raw, i)
+function process_windows(path::String, vowel_ranges::Vector{Tuple{Int64, Int64}}, window_size::Float64, step_size::Float64)
+    # Load the CSV file into a DataFrame
+    df = DataFrame(CSV.File(path))
+
+    # Initialize a plain array to store all formants
+    all_formants = []
+
+    # Iterate over each vowel range
+    for (begin_onset, end_onset) in vowel_ranges
+
+        # Select the window specified by onset begin and end
+        window = select_window(df, begin_onset, end_onset)
+
+        # Filter to only contain positive frequencies
+        filtered_window = filter(:frequency => x -> x > 0, window)
+
+        # Determine peaks
+        grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(
+            filtered_window, window_size, step_size, 0.001, :power, 0.01, 0.01
+        )
+
+        # Process peaks
+        processed_resonances = PeakAnalysis.process_peaks_mean(grouped_resonances)
+
+        # Extract formants
+        formants = FormantAnalyzer.extract_formants3(processed_resonances, 0.05)
+
+
+        # Append the best formants to the plain array
+        append!(all_formants, formants)
     end
 
+    return all_formants
+end
 
-    CSV.write(PATH_OUTPUT, temp)
-    lim_pos_raw = temp[temp.likeliness .<= 1, :]
-    overtones_limFreq = lim_pos_raw[lim_pos_raw.frequency .<= 5000, :]
-    filter_nonf0 = overtones_limFreq[overtones_limFreq.f0 .!= 0, :]
+function process(path::String, vowel_ranges::Vector{Tuple{Int64, Int64}})
+    # Load the CSV file into a DataFrame
+    df = DataFrame(CSV.File(path))
 
-    #plotharmonic(overtones_limFreq)
-    plotf0(filter_nonf0)
+    # Initialize a plain array to store all formants
+    all_formants = []
+
+    # Iterate over each vowel range
+    for (begin_onset, end_onset) in vowel_ranges
+        # Select the window specified by onset begin and end
+        window = select_window(df, begin_onset, end_onset)
+
+        # Filter to only contain positive frequencies
+        filtered_window = filter(:frequency => x -> x > 0, window)
+
+        # Determine peaks
+        grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(
+            filtered_window, 400.0, 200.0, 0.001, :power, 0.01, 0.01
+        )
+
+        # Process peaks
+        processed_resonances = PeakAnalysis.process_peaks_mean(grouped_resonances)
+
+        # Extract formants
+        formants = FormantAnalyzer.extract_formants2(processed_resonances, 0.05)
+
+        if isempty(formants)
+            #println("No formants found in the current window.")
+            append!(all_formants, [0, 0, 0, 0]) # padding with zeros
+            continue
+        end
+
+        # Select the best formants
+        best_formants = FormantAnalyzer.select_best_formants(formants)
+
+        while length(best_formants) < 4
+            push!(best_formants, 0)
+        end
+
+        # Append the best formants to the plain array
+        append!(all_formants, best_formants)
+    end
+
+    return all_formants
 end
 
 function avg_power_cluster(df, i)
@@ -515,7 +581,7 @@ end
 # note: increase accuracy increases running time as well
 #main(PATH, 6) # MOET NOG LAGER VOOR DIE SYNTHETISCHE NUMMERS
 
-df = DataFrame(CSV.File(PATH))
+#df = DataFrame(CSV.File(PATH))
 
 #window = select_window(df, 14850, 20200)
 #window = select_window(df, 34715, 36080)
@@ -531,7 +597,7 @@ end
 #debugging
 #window = select_window(df, 4559, 5723) # total vowel
 #window = select_window(df, 4559, 5001) # segment that works
-window = select_window(df, 5049, 5723) # segment that doesn't work
+#window = select_window(df, 5049, 5723) # segment that doesn't work
 #window = select_window(df, 5049, 5301)
 #window = select_window(df, 5300, 5351)
 #window = select_window(df, 5351, 5723)
@@ -549,31 +615,48 @@ window = select_window(df, 5049, 5723) # segment that doesn't work
 #window = select_window(df, 37556, 39561) # very very hard to solve
 #window = select_window(df, 42059, 43479)
 
-filtered_window = filter(:frequency => x -> x > 0, window)
+#filtered_window = filter(:frequency => x -> x > 0, window)
 
-plot = Plotting.plot_frequency_normalized_amplitude(filtered_window)
+#plot = Plotting.plot_frequency_normalized_power(filtered_window)
 #plot = Plotting.plot_frequency_normalized_power(filtered_window)
 #plot = Plotting.plot_normalized_frequency_normalized_power(filtered_window)
 #plot = Plotting.plot_frequency_amplitude(window)
 #determine_voiced(raw, 800, 800, 300.0, 0.008)
-display(plot)
+#display(plot)
 
 #n_clusters = 5
 #resonances = analyze_frequencies(filtered_window, 400, 100, 0.01, n_clusters, :power) # 0.00005 threshold for absolute power value, step_size and window that seemingly worked 800 - 800
 #plot_analyzed_frequencies(filtered_window, resonances)
 
-#grouped_resonances, normalization_factors = PeakAnalysis.identify_peaks(filtered_window, 400., 200.0, 0.01, :power, 0.01, 0.01)
+#grouped_resonances, normalization_factors = PeakAnalysis.identify_peaks(filtered_window, 400., 200.0, 0.0001, :power, 0.01, 0.01)
 #grouped_resonances, normalization_factors = PeakAnalysis.identify_peaks(filtered_window, 400., 200.0, 0.1, :amplitude, 0.01, 0.01)
-grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(filtered_window, 400., 200.0, 0.03, :amplitude, 0.01, 0.01)
-
+#grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(filtered_window, 400., 200.0, 0.05, :amplitude, 0.01, 0.01) # 0.05
+#grouped_resonances, normalization_factors = PeakAnalysis.determine_peaks(filtered_window, 400., 200.0, 0.0, :power, 0.01, 0.01)
 #processed_resonances = PeakAnalysis.process_peaks(grouped_resonances)
-processed_resonances = PeakAnalysis.process_peaks_mean(grouped_resonances)
+#processed_resonances = PeakAnalysis.process_peaks_mean(grouped_resonances)
 #harmonics = FormantAnalyzer.extract_f0_and_harmonics(processed_resonances, 0.05)
-formants = FormantAnalyzer.extract_formants2(processed_resonances, 0.05)
+#formants = FormantAnalyzer.extract_formants2(processed_resonances, 0.05)
+#formants = FormantAnalyzer.extract_formants3(processed_resonances)
+#formants = FormantAnalyzer.extract_formants(processed_resonances, 0.05)
+#formants = FormantAnalyzer.extract_naive_formants(processed_resonances)
+#println("Formants: ", formants)
+
+#plot = Plotting.plot_frequency_spectrum(processed_resonances)
+#display(plot)
 
 #scored_data = FormantScorer.calculate_scores(processed_resonances, 0.01, :power)
 #FormantScorer.print_scores(scored_data, normalization_factors)
 
 #Plotting.plot_grouped_resonances(grouped_resonances, normalization_factors)
 #Plotting.print_reconstructed_values(processed_resonances, normalization_factors)
-Plotting.print_reconstructed_values(formants, normalization_factors)
+#Plotting.print_reconstructed_values(formants, normalization_factors)
+
+#FormantAnalyzer.select_best_formants(formants)
+
+#Plotting.print_reconstructed_values(processed_resonances, normalization_factors)
+#EnvelopeAnalysis.analyze_peaks(processed_resonances)
+
+#println(formants)
+
+
+end
